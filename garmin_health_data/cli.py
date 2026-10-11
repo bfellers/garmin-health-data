@@ -196,7 +196,8 @@ def auth(
     type=click.DateTime(formats=["%Y-%m-%d"]),
     help="End date (YYYY-MM-DD), EXCLUSIVE — data from this date is not "
     "included (except when start and end are the same day, in which case "
-    "that single day is extracted). Defaults to today.",
+    "that single day is extracted). Defaults to tomorrow, so today's data "
+    "is included.",
 )
 @click.option(
     "--data-types",
@@ -415,15 +416,16 @@ def extract(
         if start_date is None:
             latest = get_latest_date(db_path)
             if latest:
-                # Start from day after last update.
-                start_date = datetime.combine(
-                    latest + timedelta(days=1), datetime.min.time()
-                )
+                # Re-fetch the latest stored day rather than starting the day
+                # after: that day may have been extracted while still in
+                # progress (e.g. a midday run includes today), so later data
+                # from it would otherwise be missed. Upserts dedupe the overlap.
+                start_date = datetime.combine(latest, datetime.min.time())
                 click.echo(
                     click.style(
                         f"📅 Auto-detected start date: "
                         f"{format_date(start_date.date())} "
-                        f"(day after last update)",
+                        f"(latest stored day, re-fetched)",
                         fg="cyan",
                     )
                 )
@@ -438,9 +440,9 @@ def extract(
                     )
                 )
 
-        # Default end date to today.
+        # Default end date to tomorrow so the exclusive end includes today.
         if end_date is None:
-            end_date = datetime.now()
+            end_date = datetime.now() + timedelta(days=1)
 
         if exclude_data_types:
             click.echo(

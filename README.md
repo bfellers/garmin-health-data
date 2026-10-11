@@ -311,8 +311,8 @@ Performs a fresh interactive login and stores OAuth tokens in `~/.garminconnect/
 
 | Flag | Type | Purpose |
 | --- | --- | --- |
-| `--start-date YYYY-MM-DD` | Inclusive | Auto-detected from the database if omitted (day after the latest stored data, or 30 days ago for an empty DB). |
-| `--end-date YYYY-MM-DD` | Exclusive (except same-day = inclusive) | Defaults to today. |
+| `--start-date YYYY-MM-DD` | Inclusive | Auto-detected from the database if omitted (the latest stored day, re-fetched since it may have been partial, or 30 days ago for an empty DB). |
+| `--end-date YYYY-MM-DD` | Exclusive (except same-day = inclusive) | Defaults to tomorrow, so today's data is included. |
 | `--data-types NAME` | Repeatable, e.g. `--data-types SLEEP --data-types HEART_RATE` | Filter to specific [data types](#data-types). All types extracted if omitted. Mutually exclusive with `--exclude-data-types`. |
 | `--exclude-data-types NAME` | Repeatable, e.g. `--exclude-data-types MENSTRUAL_CYCLE_DAY` | Extract every [data type](#data-types) *except* these (forward-compatible: types added to the tool later are still extracted). Mutually exclusive with `--data-types`. |
 | `--accounts ID` | Repeatable or comma-separated | Filter to specific Garmin user IDs (`--accounts 12345 --accounts 67890` or `--accounts 12345,67890`). All discovered accounts extracted if omitted. |
@@ -370,15 +370,16 @@ A single transient failure does not abort the run. Failures are isolated and rep
 - `--end-date`: **Exclusive**, data from this date is NOT included (except when start and end are the same day, then inclusive).
 - Example: `--start-date 2024-01-01 --end-date 2024-01-31` extracts Jan 1-30 (31st excluded).
 - Example: `--start-date 2024-01-15 --end-date 2024-01-15` extracts Jan 15 only (same-day inclusive).
+- When `--end-date` is omitted it defaults to tomorrow, so today's (partial) data is included.
 
 **Auto-detection** runs whenever `--start-date` is omitted:
 
 1. **First run (empty database)**: extracts the last 30 days.
-2. **Subsequent runs (existing data)**: queries 10 core time-series tables (sleep, heart_rate, activity, stress, body_battery, steps, respiration, floors, intensity_minutes, training_readiness), takes the **maximum** date across them, and starts from the day after.
+2. **Subsequent runs (existing data)**: queries 10 core time-series tables (sleep, heart_rate, activity, stress, body_battery, steps, respiration, floors, intensity_minutes, training_readiness), takes the **maximum** date across them, and starts from that day (inclusive). The latest stored day is re-fetched because it may have been extracted while still in progress (e.g. a midday run that included today); upserts deduplicate the overlap.
 
 Using the maximum (rather than per-table latest) means each automatic run covers all data types up to the most recent extraction, even if some types have no rows for some days (e.g. no activities recorded, no training readiness calculated). This keeps the resume logic simple, predictable, and free of redundant API calls.
 
-**Example:** if your database has sleep data through Dec 20 but activities only through Dec 18 (you didn't exercise on Dec 19-20), the next extraction starts from Dec 21. Sleep data for Dec 19-20 was already extracted, no activity data exists for those days, and the Dec 21 run picks up everything.
+**Example:** if your database has sleep data through Dec 20 but activities only through Dec 18 (you didn't exercise on Dec 19-20), the next extraction starts from Dec 20 (re-fetching it in case it was partial). Sleep data for Dec 19 was already extracted, no activity data exists for Dec 19-20, and the run picks up everything from Dec 20 onward.
 
 **Retroactively-editable data:** `MENSTRUAL_CYCLE_DAY` is re-fetched over a trailing 90-day window on every run, independent of the auto-detected start (the start is only ever extended backward, so explicit full-history ranges are unaffected). When a period start is edited after the fact in Garmin Connect, Garmin recomputes `day_in_cycle` for every following day; re-fetching a fixed recent window keeps those already-stored rows in sync via the upsert instead of leaving them stale. Before that per-day fan-out runs, a single probe of the menstrual calendar (summary) endpoint over the same window checks whether any cycle overlaps it; if none does (e.g. an account that doesn't track menstrual data), all ~90 day-view calls are skipped that run, since the dayview endpoint only returns data for dates inside a cycle window. The probe fails open, so a transient error on it falls back to running the full window.
 

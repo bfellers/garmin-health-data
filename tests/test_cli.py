@@ -500,37 +500,111 @@ def test_unmatched_files_routed_to_storage_as_backup(tmp_path):
 
 def test_extract_suppresses_date_range_line_when_window_empty(tmp_path):
     """
-    On an up-to-date database the auto-detected start (last stored day + 1) lands after
-    the default end (today), an empty window.
+    An inverted window (start after end) is an empty, no-op extraction.
 
     The CLI must not print its "Date range" line for that no-op, while still delegating
     to extract_data, which owns the authoritative short-circuit.
     """
-    from datetime import date
-
     db_path = tmp_path / "test.db"
     create_tables(str(db_path))
 
     runner = CliRunner()
-    # A far-future "last stored day" guarantees start > today's end regardless of the
-    # wall clock, reproducing the up-to-date-database inverted window deterministically.
     with (
         patch("garmin_health_data.cli.ensure_authenticated"),
-        patch("garmin_health_data.cli.get_latest_date", return_value=date(2999, 1, 1)),
         patch(
             "garmin_health_data.cli.extract_data",
             side_effect=_stub_extract_no_files,
         ) as mock_extract,
     ):
-        result = runner.invoke(extract, ["--db-path", str(db_path)])
+        result = runner.invoke(
+            extract,
+            [
+                "--db-path",
+                str(db_path),
+                "--start-date",
+                "2025-01-05",
+                "--end-date",
+                "2025-01-02",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
-    # Auto-detect path ran, so execution reached the range-printing region...
-    assert "Auto-detected start date:" in result.output
-    # ...and the misleading backwards range line was suppressed.
+    # The misleading backwards range line was suppressed.
     assert "Date range:" not in result.output
     # Delegation still happens; extract_data performs the real no-op short-circuit.
     mock_extract.assert_called_once()
+
+
+def _invoke_extract_capturing_window(tmp_path, latest, *extra_args):
+    """
+    Invoke extract with a stubbed latest date and capture the extraction window.
+
+    :param tmp_path: Pytest temporary directory.
+    :param latest: Value returned by the stubbed get_latest_date.
+    :param extra_args: Additional CLI arguments.
+    :return: Tuple of (CliRunner result, captured extract_data kwargs).
+    """
+    db_path = tmp_path / "test.db"
+    create_tables(str(db_path))
+    captured = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return _stub_extract_no_files()
+
+    runner = CliRunner()
+    with (
+        patch("garmin_health_data.cli.ensure_authenticated"),
+        patch("garmin_health_data.cli.get_latest_date", return_value=latest),
+        patch("garmin_health_data.cli.extract_data", side_effect=capture),
+    ):
+        result = runner.invoke(extract, ["--db-path", str(db_path), *extra_args])
+    return result, captured
+
+
+def test_extract_default_end_date_includes_today(tmp_path):
+    """
+    With no --end-date, the exclusive end defaults to tomorrow so today is extracted.
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    result, captured = _invoke_extract_capturing_window(
+        tmp_path, today - timedelta(days=3)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["data_interval_start"] == (today - timedelta(days=3)).isoformat()
+    assert captured["data_interval_end"] == (today + timedelta(days=1)).isoformat()
+
+
+def test_extract_up_to_date_db_refetches_today(tmp_path):
+    """
+    When the database already holds today's data, the auto-detected start is today (not
+    tomorrow) so a later same-day run picks up newly recorded data.
+    """
+    from datetime import date, timedelta
+
+    today = date.today()
+    result, captured = _invoke_extract_capturing_window(tmp_path, today)
+
+    assert result.exit_code == 0, result.output
+    assert "latest stored day, re-fetched" in result.output
+    assert captured["data_interval_start"] == today.isoformat()
+    assert captured["data_interval_end"] == (today + timedelta(days=1)).isoformat()
+
+
+def test_extract_explicit_end_date_stays_exclusive(tmp_path):
+    """
+    An explicit --end-date is passed through unchanged (still exclusive).
+    """
+    result, captured = _invoke_extract_capturing_window(
+        tmp_path, None, "--start-date", "2025-01-01", "--end-date", "2025-01-10"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["data_interval_start"] == "2025-01-01"
+    assert captured["data_interval_end"] == "2025-01-10"
 
 
 def test_extract_prints_date_range_line_for_normal_window(tmp_path):
